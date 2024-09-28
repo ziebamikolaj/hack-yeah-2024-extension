@@ -1,0 +1,1 @@
+chrome.tabs.onUpdated.addListener((e,r,s)=>{r.status==="complete"&&s.url&&chrome.tabs.sendMessage(e,{action:"urlChanged",url:s.url})});chrome.runtime.onMessage.addListener((e,r,s)=>{if(e.action==="requestScore"){const o=Math.floor(Math.random()*100);chrome.runtime.sendMessage({action:"updateScore",score:o.toString()})}});
