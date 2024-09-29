@@ -1,4 +1,4 @@
-import { messageScore } from "@/types/message";
+import { ApiResponse } from "@/types/apiResponse";
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "complete" && tab.url) {
@@ -9,16 +9,41 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, senderResponse) => {
   if (message.action === "requestScore") {
-    // Here you would typically make an API call to get the real score
-    // For this example, we'll just use a random number
-    const score = Math.floor(Math.random() * 100);
-
-    // Send the score back to the popup
-    chrome.runtime.sendMessage({
-      action: "updateScore",
-      score: score.toString(),
-    } as messageScore);
+    fetch(`https://is-this-fishy.vercel.app/api/domain/${message.url}`, {
+      method: "GET",
+    })
+      .then((res) => res.text())
+      .then((data) => {
+        if (data === "No domain found") {
+          // Handle the "No domain found" case
+          const errorResponse = { error: "No domain found" };
+          chrome.runtime.sendMessage({
+            action: "updateScore",
+            error: "No domain found",
+          });
+          senderResponse(errorResponse);
+        } else {
+          // If it's not the error string, parse it as JSON
+          const jsonData: ApiResponse = JSON.parse(data);
+          chrome.runtime.sendMessage({
+            action: "updateScore",
+            score: jsonData.overallScore.toString(),
+            details: jsonData,
+          });
+          senderResponse(jsonData);
+        }
+      })
+      .catch((error) => {
+        console.error("Error fetching score:", error);
+        const errorResponse = { error: "Failed to fetch score" };
+        chrome.runtime.sendMessage({
+          action: "updateScore",
+          error: "Failed to fetch score",
+        });
+        senderResponse(errorResponse);
+      });
+    return true; // Indicates that the response is sent asynchronously
   }
 });

@@ -1,63 +1,121 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle, ExternalLink, Shield } from "lucide-react";
+import { AlertTriangle, CheckCircle, ExternalLink } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Switch } from "@/components/ui/switch";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { messageScore, messageUrl } from "@/types/message";
+import { ApiResponse } from "@/types/apiResponse";
+import CalculateStars from "@/components/calculate-stars";
 
 const getDomainFromUrl = (url: string) => {
   try {
     const urlObj = new URL(url);
     return urlObj.hostname.replace(/^www\./, "");
   } catch {
-    console.error("Invalid URL:", url);
-    return "";
+    try {
+      const urlObj = new URL(`https://${url}`);
+      return urlObj.hostname.replace(/^www\./, "");
+    } catch {
+      console.error("Invalid URL:", url);
+      return "";
+    }
   }
+};
+
+const isCacheValid = (timestamp: number) => {
+  const now = Date.now();
+  const cacheAge = now - timestamp;
+  // Cache is valid for 24 hours
+  return cacheAge < 3600000 * 24;
 };
 
 export const PopupContent = () => {
   const [isEnabled, setIsEnabled] = useState(true);
-  const [score, setScore] = useState<number>();
+  const [scoreData, setScoreData] = useState<ApiResponse | null>(null);
   const [currentUrl, setCurrentUrl] = useState("");
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Get the current tab's URL when the popup is opened
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      setCurrentUrl(getDomainFromUrl(tabs[0]?.url ?? ""));
-      // Simulate fetching data
-      setTimeout(() => {
+      const url = tabs[0]?.url ?? "";
+      const domain = getDomainFromUrl(url);
+      setCurrentUrl(domain);
+
+      if (domain && isEnabled) {
+        const cachedData = localStorage.getItem(domain);
+        if (cachedData) {
+          const { data, timestamp } = JSON.parse(cachedData);
+          if (isCacheValid(timestamp)) {
+            setScoreData(data);
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        chrome.runtime.sendMessage(
+          { action: "requestScore", url: domain },
+          (response: ApiResponse | { error: string }) => {
+            if (response && !("error" in response)) {
+              setScoreData(response);
+              localStorage.setItem(
+                domain,
+                JSON.stringify({ data: response, timestamp: Date.now() })
+              );
+            } else {
+              console.error("Error fetching score:", response.error);
+              setScoreData(null);
+            }
+            setIsLoading(false);
+          }
+        );
+      } else {
+        setScoreData(null);
         setIsLoading(false);
-      }, 1500);
+      }
     });
 
-    // Listen for URL updates and score changes from the content script
-    const messageListener = (message: messageUrl | messageScore) => {
+    const messageListener = (
+      message: messageUrl | messageScore | { action: string; error: string }
+    ) => {
       if (message.action === "updatePopupUrl") {
-        setCurrentUrl(getDomainFromUrl((message as messageUrl).url));
-      } else if (message.action === "updateScore") {
-        setScore(parseInt((message as messageScore).score, 10));
-        requestScoreUpdate();
+        const newDomain = getDomainFromUrl((message as messageUrl).url);
+        setCurrentUrl(newDomain);
+        if (isEnabled) {
+          // Check cache for the new domain
+          const cachedData = localStorage.getItem(newDomain);
+          if (cachedData) {
+            const { data, timestamp } = JSON.parse(cachedData);
+            if (isCacheValid(timestamp)) {
+              setScoreData(data);
+              setIsLoading(false);
+              return;
+            }
+          }
+        }
+      } else if (message.action === "updateScore" && isEnabled) {
+        if ("error" in message) {
+          console.error("Error updating score:", message.error);
+          setScoreData(null);
+        } else {
+          const newScoreData = (message as messageScore).details;
+          setScoreData(newScoreData);
+          localStorage.setItem(
+            currentUrl,
+            JSON.stringify({ data: newScoreData, timestamp: Date.now() })
+          );
+        }
         setIsLoading(false);
       }
     };
 
     chrome.runtime.onMessage.addListener(messageListener);
 
-    // Cleanup listener on component unmount
     return () => {
       chrome.runtime.onMessage.removeListener(messageListener);
     };
-  }, []);
+  }, [currentUrl, isEnabled]);
 
   const getScoreColor = (score: number) => {
     if (score <= 30) return "bg-red-500";
@@ -71,10 +129,6 @@ export const PopupContent = () => {
     return "Safe and Trustworthy, no fishes here";
   };
 
-  const requestScoreUpdate = () => {
-    chrome.runtime.sendMessage({ action: "scoreChanged", score: score });
-  };
-
   let content;
   if (isLoading) {
     content = (
@@ -83,12 +137,12 @@ export const PopupContent = () => {
         <p className="text-sm text-gray-600">Fetching website information...</p>
       </div>
     );
-  } else if (isEnabled) {
+  } else if (isEnabled && scoreData) {
     content = (
       <>
         <div className="mb-4">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-medium">Website:</span>
+            <span className="text-sm font-medium">Website</span>
             <span className="rounded px-2 py-1 text-sm" title={currentUrl}>
               {currentUrl}
             </span>
@@ -96,34 +150,80 @@ export const PopupContent = () => {
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-medium">Trust Score</span>
             <span
-              className={`text-sm font-bold ${getScoreColor(score ?? 0)} rounded px-2 py-1 text-white`}
+              className={`text-sm font-bold ${getScoreColor(
+                scoreData.overallScore
+              )} rounded px-2 py-1 text-white`}
             >
-              {score}
+              {scoreData.overallScore}
             </span>
           </div>
-          <Progress value={score} className="h-2" />
+          <Progress value={scoreData.overallScore} className="h-2" />
           <p className="mt-1 text-xs text-gray-500">
-            {getScoreText(score ?? 0)}
+            {getScoreText(scoreData.overallScore)}
           </p>
         </div>
 
         <div className="mb-4 space-y-2">
           <div className="flex items-center">
-            <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
-            <span className="text-sm">SSL Certificate</span>
+            {scoreData.ssl ? (
+              <>
+                <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
+                <span className="text-sm">SSL Secure</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="mr-2 h-4 w-4 text-yellow-500" />
+                <span className="text-sm">Not Secured with SSL</span>
+              </>
+            )}
           </div>
           <div className="flex items-center">
-            <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
-            <span className="text-sm">Verified Ownership</span>
+            {scoreData.userReviews.reviewAverage > 2.7 ? (
+              <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
+            ) : (
+              <AlertTriangle className="mr-2 h-4 w-4 text-yellow-500" />
+            )}
+            <span className="text-sm w-full justify-between flex">
+              User Review Score
+              <div className="flex">
+                <CalculateStars
+                  averageScore={scoreData.userReviews.reviewAverage}
+                />
+              </div>
+            </span>
           </div>
           <div className="flex items-center">
-            <AlertTriangle className="mr-2 h-4 w-4 text-yellow-500" />
-            <span className="text-sm">Some suspicious reviews detected</span>
+            {scoreData.websiteAge.score > 70 ? (
+              <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
+            ) : (
+              <AlertTriangle className="mr-2 h-4 w-4 text-yellow-500" />
+            )}
+
+            <span className="text-sm">
+              Website Age {scoreData.websiteAge.age}
+            </span>
+          </div>
+          <div className="flex items-center">
+            {scoreData.breaches.score === 100 ? (
+              <>
+                <CheckCircle className="mr-2 h-4 w-4 text-green-500" />
+                <span className="text-sm">No data breaches detected</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="mr-2 h-4 w-4 text-yellow-500" />
+                <span className="text-sm">
+                  Detected a data breach in the past
+                </span>
+              </>
+            )}
           </div>
         </div>
 
         <a
-          href={`https://is-this-fishy.vercel.app/${currentUrl}`}
+          href={`https://is-this-fishy.vercel.app/domain/${encodeURIComponent(
+            currentUrl
+          )}`}
           className="flex w-full items-center justify-center rounded-md bg-blue-500 px-4 py-2 text-sm font-medium text-white transition-colors duration-300 hover:bg-blue-600"
           target="_blank"
           rel="noopener noreferrer"
@@ -147,6 +247,16 @@ export const PopupContent = () => {
         </div>
       </>
     );
+  } else if (isEnabled && scoreData === null) {
+    content = (
+      <div className="py-4 text-center">
+        <AlertTriangle className="mx-auto mb-2 h-12 w-12 text-yellow-500" />
+        <p className="mb-4 text-sm text-gray-600">
+          Unable to fetch information for this website. It may not be in our
+          database or there might be a connection issue.
+        </p>
+      </div>
+    );
   } else {
     content = (
       <div className="py-4 text-center">
@@ -165,7 +275,7 @@ export const PopupContent = () => {
       <div className="mb-4 flex items-center justify-between">
         <div className="flex w-full justify-between">
           <h1 className="text-ri text-lg font-bold">IsThisFishy</h1>
-          <img src="icon.png" width={40} height={40}></img>
+          <img src="icon.png" width={40} height={40} alt="IsThisFishy logo" />
         </div>
       </div>
 
