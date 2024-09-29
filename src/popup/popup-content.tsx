@@ -5,9 +5,10 @@ import { AlertTriangle, CheckCircle, ExternalLink } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { messageScore, messageUrl } from "@/types/message";
 import { ApiResponse } from "@/types/apiResponse";
 import CalculateStars from "@/components/calculate-stars";
+
+type ScoreData = ApiResponse | string | null;
 
 const getDomainFromUrl = (url: string) => {
   try {
@@ -24,16 +25,9 @@ const getDomainFromUrl = (url: string) => {
   }
 };
 
-const isCacheValid = (timestamp: number) => {
-  const now = Date.now();
-  const cacheAge = now - timestamp;
-  // Cache is valid for 24 hours
-  return cacheAge < 3600000 * 24;
-};
-
 export const PopupContent = () => {
   const [isEnabled, setIsEnabled] = useState(true);
-  const [scoreData, setScoreData] = useState<ApiResponse | null>(null);
+  const [scoreData, setScoreData] = useState<ScoreData>(null);
   const [currentUrl, setCurrentUrl] = useState("");
   const [isLoading, setIsLoading] = useState(true);
 
@@ -44,68 +38,28 @@ export const PopupContent = () => {
       setCurrentUrl(domain);
 
       if (domain && isEnabled) {
-        const cachedData = localStorage.getItem(domain);
-        if (cachedData) {
-          const { data, timestamp } = JSON.parse(cachedData);
-          if (isCacheValid(timestamp)) {
-            setScoreData(data);
+        chrome.storage.local.get(domain, (result) => {
+          if (result[domain]) {
+            setScoreData(result[domain]);
             setIsLoading(false);
-            return;
+          } else {
+            chrome.runtime.sendMessage({ action: "fetchScore", url: domain });
           }
-        }
-
-        chrome.runtime.sendMessage(
-          { action: "requestScore", url: domain },
-          (response: ApiResponse | { error: string }) => {
-            if (response && !("error" in response)) {
-              setScoreData(response);
-              localStorage.setItem(
-                domain,
-                JSON.stringify({ data: response, timestamp: Date.now() })
-              );
-            } else {
-              console.error("Error fetching score:", response.error);
-              setScoreData(null);
-            }
-            setIsLoading(false);
-          }
-        );
+        });
       } else {
         setScoreData(null);
         setIsLoading(false);
       }
     });
 
-    const messageListener = (
-      message: messageUrl | messageScore | { action: string; error: string }
-    ) => {
-      if (message.action === "updatePopupUrl") {
-        const newDomain = getDomainFromUrl((message as messageUrl).url);
-        setCurrentUrl(newDomain);
-        if (isEnabled) {
-          // Check cache for the new domain
-          const cachedData = localStorage.getItem(newDomain);
-          if (cachedData) {
-            const { data, timestamp } = JSON.parse(cachedData);
-            if (isCacheValid(timestamp)) {
-              setScoreData(data);
-              setIsLoading(false);
-              return;
-            }
-          }
-        }
-      } else if (message.action === "updateScore" && isEnabled) {
-        if ("error" in message) {
-          console.error("Error updating score:", message.error);
-          setScoreData(null);
-        } else {
-          const newScoreData = (message as messageScore).details;
-          setScoreData(newScoreData);
-          localStorage.setItem(
-            currentUrl,
-            JSON.stringify({ data: newScoreData, timestamp: Date.now() })
-          );
-        }
+    const messageListener = (message: {
+      action: string;
+      url?: string;
+      data?: ApiResponse | string;
+    }) => {
+      if (message.action === "scoreUpdated" && message.url && message.data) {
+        setCurrentUrl(message.url);
+        setScoreData(message.data);
         setIsLoading(false);
       }
     };
@@ -115,18 +69,24 @@ export const PopupContent = () => {
     return () => {
       chrome.runtime.onMessage.removeListener(messageListener);
     };
-  }, [currentUrl, isEnabled]);
+  }, [isEnabled]);
 
-  const getScoreColor = (score: number) => {
-    if (score <= 30) return "bg-red-500";
-    if (score <= 70) return "bg-yellow-500";
-    return "bg-green-500";
+  const getScoreColorClass = (score: number) => {
+    if (score <= 30) return "bg-red-500 text-white";
+    if (score <= 70) return "bg-yellow-500 text-black";
+    return "bg-green-500 text-white";
   };
 
   const getScoreText = (score: number) => {
     if (score <= 30) return "Very Fishy";
     if (score <= 70) return "Proceed with Caution, can be fishy";
     return "Safe and Trustworthy, no fishes here";
+  };
+
+  const getProgressColorClass = (score: number) => {
+    if (score <= 30) return "bg-red-500";
+    if (score <= 70) return "bg-yellow-500";
+    return "bg-green-500";
   };
 
   let content;
@@ -137,7 +97,7 @@ export const PopupContent = () => {
         <p className="text-sm text-gray-600">Fetching website information...</p>
       </div>
     );
-  } else if (isEnabled && scoreData) {
+  } else if (isEnabled && scoreData && typeof scoreData !== "string") {
     content = (
       <>
         <div className="mb-4">
@@ -150,14 +110,17 @@ export const PopupContent = () => {
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-medium">Trust Score</span>
             <span
-              className={`text-sm font-bold ${getScoreColor(
-                scoreData.overallScore
-              )} rounded px-2 py-1 text-white`}
+              className={`text-sm font-bold ${getScoreColorClass(
+                Math.round(scoreData.overallScore)
+              )} rounded px-2 py-1`}
             >
-              {scoreData.overallScore}
+              {Math.round(scoreData.overallScore)}
             </span>
           </div>
-          <Progress value={scoreData.overallScore} className="h-2" />
+          <Progress
+            value={scoreData.overallScore}
+            className={`h-2 ${getProgressColorClass(scoreData.overallScore)}`}
+          />
           <p className="mt-1 text-xs text-gray-500">
             {getScoreText(scoreData.overallScore)}
           </p>
@@ -247,13 +210,14 @@ export const PopupContent = () => {
         </div>
       </>
     );
-  } else if (isEnabled && scoreData === null) {
+  } else if (isEnabled && scoreData && typeof scoreData === "string") {
     content = (
       <div className="py-4 text-center">
         <AlertTriangle className="mx-auto mb-2 h-12 w-12 text-yellow-500" />
         <p className="mb-4 text-sm text-gray-600">
-          Unable to fetch information for this website. It may not be in our
-          database or there might be a connection issue.
+          {scoreData === "No domain found"
+            ? "This domain is not in our database yet."
+            : "Unable to fetch information for this website."}
         </p>
       </div>
     );

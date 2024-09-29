@@ -1,1 +1,1 @@
-/* empty css       */chrome.runtime.onMessage.addListener(e=>{e.action==="urlChanged"&&chrome.runtime.sendMessage({action:"updatePopupUrl",url:e.url})});chrome.runtime.onMessage.addListener(e=>{e.action==="scoreChanged"&&chrome.action.setBadgeText({text:e.score})});
+/* empty css       */chrome.runtime.onMessage.addListener(e=>{e.action==="urlChanged"&&chrome.runtime.sendMessage({action:"updatePopupUrl",url:e.url})});
